@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-Hans">
+<head>
+  <meta name="description" content="这是虚构的测试简介，不含年龄信息。">
+  <meta property="og:image" content="https://img.example/covers/12.jpg">
+  <meta property="og:video" content="https://cdn.example/secret/index.m3u8">
+  <meta property="og:video:secure_url" content="https://cdn.example/secret/index.m3u8">
+  <title>虚构作品甲</title>
+</head>
+<body>
+  <h1 class="hg-web-play__title">虚构作品甲</h1>
+  <a class="hg-web-play__ep" href="/video/12/">01</a>
+  <a class="hg-web-play__ep" href="/video/12/ep-1/">01</a>
+  <a class="hg-web-play__ep" href="/video/12/ep-2/">02</a>
+  <a class="hg-web-play__ep" href="/video/12/ep-3/">03</a>
+  <a href="/api/play/12">接口</a>
+  <a href="/videos/embed/12">嵌入</a>
+  <a href="https://cdn.example/secret/index.m3u8">流</a>
+  <a href="/video/12/ep-2/?token=abc">带参数</a>
+  <a href="/video/99/">其他作品</a>
+  <a href="https://other.example/video/12/ep-4/">外站</a>
+  <script id="videoInitialData" type="application/json">
+  {
+    "id": "12",
+    "title": "虚构作品甲",
+    "description": "这是虚构的测试简介，不含年龄信息。",
+    "author": "测试作者",
+    "time": "2026-11-01 10:00:00",
+    "views": "1.5w",
+    "likes": "2.1k",
+    "likesNum": 2150,
+    "collects": "0.8w",
+    "collectsNum": 7728,
+    "commentsCount": "6",
+    "tags": ["短剧", "都市"],
+    "tagLinks": [{"name": "都市", "url": "/tag/dushi/"}],
+    "tracking": {"total_episode": 3, "drama_type_name": "短剧"},
+    "ignored_stream": "https://cdn.example/secret/index.m3u8",
+    "ignored_key": "SENTINEL_KEY_DO_NOT_STORE",
+    "ignored_iv": "SENTINEL_IV_DO_NOT_STORE",
+    "ignored_cdn_auth": "SENTINEL_CDN_AUTH_DO_NOT_STORE",
+    "ignored_preview": "https://cdn.example/preview/stream.m3u8",
+    "ignored_api": "/api/play/12"
+  }
+  </script>
+</body>
+</html>

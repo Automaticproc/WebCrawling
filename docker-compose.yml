@@ -1,0 +1,48 @@
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: catalog
+      MYSQL_USER: catalog
+      MYSQL_PASSWORD: catalog
+      MYSQL_ROOT_PASSWORD: root
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-time-zone=+00:00
+    ports:
+      - "3306:3306"
+    volumes:
+      - catalog-mysql:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "127.0.0.1", "-ucatalog", "-pcatalog"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: ./backend
+    environment:
+      APP_ADDR: ":43123"
+      MYSQL_DSN: catalog:catalog@tcp(mysql:3306)/catalog?parseTime=true&charset=utf8mb4&loc=UTC&clientFoundRows=true
+      ADMIN_USERNAME: admin
+      ADMIN_PASSWORD: change-me-please
+      SESSION_SECRET: replace-with-a-long-random-string
+      WEB_ORIGIN: http://127.0.0.1:43124
+      SYNC_DELAY_MS: "400"
+      TZ: Asia/Hong_Kong
+    ports:
+      - "43123:43123"
+    depends_on:
+      mysql:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    ports:
+      - "43124:80"
+    depends_on:
+      - api
+
+volumes:
+  catalog-mysql:
