@@ -58,18 +58,75 @@ cd frontend && npm install && npm run dev
 
 启动时只会建库、创建管理员、写入内置跳过规则和 `huangguoai` 平台，**不会**自动抓取来源站。定时任务要等到下一次香港时间 08:00 才跑增量。
 
-## Docker Compose
+## Docker Compose（完整部署）
+
+三个容器：MySQL 8、Go API（内含 ffmpeg + Chromium）、Nginx 前端。宿主机不需要装 Go / Node / ffmpeg / Chrome。
+
+### 1. 准备 `.env`
+
+在仓库根目录创建 `.env`（compose 会自动读取，用于变量替换）：
 
 ```bash
-docker compose up --build
+ADMIN_PASSWORD=换成你的强密码
+SESSION_SECRET=换成至少32位的随机串
+MYSQL_ROOT_PASSWORD=换成强密码
+WEB_ORIGIN=http://127.0.0.1:43124
 ```
 
-- 页面：<http://127.0.0.1:43124>
-- API：<http://127.0.0.1:43123/api/v1/health>
-- 默认管理员：`admin` / `change-me-please`（请在 `docker-compose.yml` 里改掉）
-- MySQL：`127.0.0.1:3306`，库 `catalog`，用户 `catalog` / `catalog`
+部署到服务器并把 43124 暴露给外部时，`WEB_ORIGIN` 改成 `http://服务器IP:43124`（走域名/HTTPS 就填对应地址）。
+`.env` 同时也会被本地 `go run` 读取，但 compose 里的 `MYSQL_DSN` 是写死的 `mysql:3306`，不受影响。
 
-容器里的 API 使用主机名 `mysql`。本机直接 `go run` 时使用 `.env.example` 里的 `127.0.0.1`。
+### 2. 构建并启动
+
+```bash
+docker compose up -d --build
+```
+
+首次构建会装 Debian 的 Chromium，镜像大约 1 GB，耗时取决于网络；不需要抓流可以把 `docker-compose.yml` 里的
+`INSTALL_BROWSER` 改成 `"0"`，并删掉 `DOWNLOAD_BROWSER`，镜像会小很多。
+
+启动后：
+
+- 页面：<http://127.0.0.1:43124>
+- API 健康检查：<http://127.0.0.1:43123/api/v1/health>（默认只绑本机，前端经 nginx 反代访问）
+- MySQL：只绑定 `127.0.0.1:3306`，不暴露公网
+- 数据库迁移在 API 启动时自动执行（`0001`~`0003`）
+
+### 3. 常用命令
+
+```bash
+docker compose ps
+docker compose logs -f api
+docker compose restart api
+docker compose up -d --build        # 代码更新后重建
+docker compose down                 # 停容器，保留数据卷
+docker compose down -v              # 连数据一起删（谨慎）
+```
+
+### 4. 数据与备份
+
+| 卷 | 内容 |
+| --- | --- |
+| `catalog-mysql` | MySQL 数据 |
+| `catalog-downloads` | 下载的 MP4、临时目录、浏览器 profile |
+
+```bash
+# 备份下载目录
+docker run --rm -v webcrawling_catalog-downloads:/data -v "$PWD":/backup alpine \
+  tar czf /backup/downloads.tgz -C /data .
+```
+
+### 5. 容器里下载/登录的注意点
+
+- Chromium 已装，`DOWNLOAD_NO_SANDBOX=1` 已设置；无桌面环境可直接跑。
+- 自动填表登录可用；验证码、短信/扫码、2FA 过不了，建议在「平台管理」里直接填 Cookie。
+- 不要配 `DOWNLOAD_BROWSER_PORT` 去连宿主机的 Chrome，容器网络隔离连不到；让容器自己启动 Chromium。
+- 下载文件通过 `/api/v1/downloads/.../file` 经 Nginx 转发，超时和缓冲已按大文件调过。
+- 部署在公网时建议前面再加一层 HTTPS 反代（Caddy / Traefik / 云 LB），并把 43124 之外的端口关掉。
+
+### 6. 本地开发 vs Docker
+
+Docker 里 API 用主机名 `mysql`；本机 `go run` 时用 `.env.example` 里的 `127.0.0.1`。两套可以并存，互不影响。
 
 ## 测试与构建
 

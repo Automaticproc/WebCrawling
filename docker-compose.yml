@@ -1,17 +1,21 @@
 services:
   mysql:
     image: mysql:8.0
+    restart: unless-stopped
     environment:
       MYSQL_DATABASE: catalog
       MYSQL_USER: catalog
       MYSQL_PASSWORD: catalog
-      MYSQL_ROOT_PASSWORD: root
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-root}
     command:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_unicode_ci
       - --default-time-zone=+00:00
-    ports:
-      - "3306:3306"
+    # 不映射宿主端口：API 走 compose 内网 mysql:3306。
+    # 3306 常被 Windows/Hyper-V 保留（netsh int ipv4 show excludedportrange protocol=tcp），
+    # 需要本机连库时用非保留端口，例如：
+    # ports:
+    #   - "127.0.0.1:13306:3306"
     volumes:
       - catalog-mysql:/var/lib/mysql
     healthcheck:
@@ -24,15 +28,16 @@ services:
     build:
       context: ./backend
       args:
-        # 设为 1 会在镜像里装 Chromium，抓 JS 动态流时需要
-        INSTALL_BROWSER: "0"
+        # 1 = 镜像里装 Chromium（抓 JS 动态流 / 自动登录用），镜像会大几百 MB
+        INSTALL_BROWSER: "1"
+    restart: unless-stopped
     environment:
       APP_ADDR: ":43123"
       MYSQL_DSN: catalog:catalog@tcp(mysql:3306)/catalog?parseTime=true&charset=utf8mb4&loc=UTC&clientFoundRows=true
-      ADMIN_USERNAME: admin
-      ADMIN_PASSWORD: change-me-please
-      SESSION_SECRET: replace-with-a-long-random-string
-      WEB_ORIGIN: http://127.0.0.1:43124
+      ADMIN_USERNAME: ${ADMIN_USERNAME:-admin}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-change-me-please}
+      SESSION_SECRET: ${SESSION_SECRET:-replace-with-a-long-random-string}
+      WEB_ORIGIN: ${WEB_ORIGIN:-http://127.0.0.1:43124}
       SYNC_DELAY_MS: "400"
       TZ: Asia/Hong_Kong
       DOWNLOAD_DIR: /data/downloads
@@ -43,17 +48,26 @@ services:
     volumes:
       - catalog-downloads:/data/downloads
     ports:
-      - "43123:43123"
+      # 前端经 nginx 反代访问 API；默认只绑本机，需要直连再改成 "43123:43123"
+      - "127.0.0.1:43123:43123"
     depends_on:
       mysql:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:43123/api/v1/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
   web:
     build: ./frontend
+    restart: unless-stopped
     ports:
       - "43124:80"
     depends_on:
-      - api
+      api:
+        condition: service_healthy
 
 volumes:
   catalog-mysql:

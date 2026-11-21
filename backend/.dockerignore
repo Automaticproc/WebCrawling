@@ -1,0 +1,7 @@
+.git
+.env
+downloads
+*.mp4
+*.ts
+catalogd
+.DS_Store
