@@ -44,5 +44,8 @@ func Run(ctx context.Context, st store.Store, cfg config.Config) error {
 	if err := st.EnsureBuiltinRule(ctx, skip.BuiltinRule()); err != nil {
 		return err
 	}
-	return st.FailStaleJobs(ctx, "进程重启，未完成的同步已中止")
+	if err := st.FailStaleJobs(ctx, "进程重启，未完成的同步已中止"); err != nil {
+		return err
+	}
+	return st.FailStaleDownloads(ctx, "进程重启，未完成的下载已中止")
 }

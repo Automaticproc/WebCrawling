@@ -21,7 +21,11 @@ services:
       retries: 20
 
   api:
-    build: ./backend
+    build:
+      context: ./backend
+      args:
+        # 设为 1 会在镜像里装 Chromium，抓 JS 动态流时需要
+        INSTALL_BROWSER: "0"
     environment:
       APP_ADDR: ":43123"
       MYSQL_DSN: catalog:catalog@tcp(mysql:3306)/catalog?parseTime=true&charset=utf8mb4&loc=UTC&clientFoundRows=true
@@ -31,6 +35,13 @@ services:
       WEB_ORIGIN: http://127.0.0.1:43124
       SYNC_DELAY_MS: "400"
       TZ: Asia/Hong_Kong
+      DOWNLOAD_DIR: /data/downloads
+      DOWNLOAD_BROWSER: /usr/bin/chromium
+      DOWNLOAD_BROWSER_PROFILE: /data/downloads/.browser-profile
+      DOWNLOAD_BROWSER_TIMEOUT_SEC: "45"
+      DOWNLOAD_CONCURRENCY: "8"
+    volumes:
+      - catalog-downloads:/data/downloads
     ports:
       - "43123:43123"
     depends_on:
@@ -46,3 +57,4 @@ services:
 
 volumes:
   catalog-mysql:
+  catalog-downloads:

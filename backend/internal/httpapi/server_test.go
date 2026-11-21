@@ -33,7 +33,7 @@ func TestLoginRequiredAndBuiltinRuleLocked(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := config.Config{SessionSecret: "test-session-secret-value", WebOrigin: "http://127.0.0.1:43124"}
-	h := New(cfg, st, syncer.New(st, 0)).Handler()
+	h := New(cfg, st, syncer.New(st, 0), nil).Handler()
 
 	res := httptest.NewRecorder()
 	h.ServeHTTP(res, httptest.NewRequest(http.MethodGet, "/api/v1/platforms", nil))

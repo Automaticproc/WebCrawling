@@ -17,10 +17,11 @@
         <el-menu-item index="/platforms">平台</el-menu-item>
         <el-menu-item index="/works">作品</el-menu-item>
         <el-menu-item index="/jobs">同步任务</el-menu-item>
+        <el-menu-item index="/downloads">下载任务</el-menu-item>
         <el-menu-item index="/rules">跳过规则</el-menu-item>
       </el-menu>
       <p class="note" style="margin-top: auto; color: #c8b4a6">
-        播放链接只保存官方作品页。系统不采集视频文件。
+        播放链接只保存官方作品页。下载只用于你确认有权保存的内容。
       </p>
     </aside>
     <section class="main">

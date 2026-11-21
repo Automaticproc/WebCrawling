@@ -7,11 +7,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 	"unicode/utf8"
 
 	"catalog/internal/config"
+	"catalog/internal/download"
 	"catalog/internal/httpapi"
 	"catalog/internal/migrate"
 	"catalog/internal/scheduler"
@@ -50,13 +52,32 @@ func main() {
 	cancel()
 
 	svc := syncer.New(st, cfg.SyncDelay)
+	engine := download.NewEngine(cfg.FFmpegPath, cfg.DownloadConcurrency)
+	engine.TempRoot = filepath.Join(cfg.DownloadDir, ".tmp")
+	resolver := download.NewResolver(cfg.BrowserPath, cfg.BrowserTimeout)
+	resolver.BrowserPort = cfg.BrowserPort
+	resolver.BrowserProfile = cfg.BrowserProfile
+	if resolver.BrowserProfile == "" {
+		// 默认持久化，登录态可以跨进程复用
+		resolver.BrowserProfile = filepath.Join(cfg.DownloadDir, ".browser-profile")
+	}
+	resolver.Cookies = cfg.BrowserCookie
+	resolver.LoginURL = cfg.LoginURL
+	resolver.LoginUser = cfg.LoginUser
+	resolver.LoginPassword = cfg.LoginPassword
+	resolver.LoginUserSelector = cfg.LoginUserSelector
+	resolver.LoginPassSelector = cfg.LoginPassSelector
+	resolver.LoginSubmitSelector = cfg.LoginSubmitSelector
+	resolver.TempDir = engine.TempRoot
+	dl := download.NewService(st, resolver, engine, cfg.DownloadDir)
+	dl.Secret = cfg.SessionSecret
 	runCtx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go scheduler.New(st, svc).Run(runCtx)
 
 	srv := &http.Server{
 		Addr:              cfg.Addr,
-		Handler:           httpapi.New(cfg, st, svc).Handler(),
+		Handler:           httpapi.New(cfg, st, svc, dl).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	go func() {

@@ -37,7 +37,48 @@ const (
 	TargetAll         = "all"
 
 	OverlapReason = "同一平台已有进行中的同步，本次已跳过"
+
+	DownloadQueued    = "queued"
+	DownloadRunning   = "running"
+	DownloadSucceeded = "succeeded"
+	DownloadFailed    = "failed"
+	DownloadCanceled  = "canceled"
 )
+
+type DownloadTask struct {
+	ID                int64
+	WorkID            int64
+	PlatformID        int64
+	Status            string
+	TotalEpisodes     int
+	CompletedEpisodes int
+	FailedEpisodes    int
+	Quality           string
+	OutputDir         string
+	ErrorMessage      string
+	StartedAt         *time.Time
+	FinishedAt        *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+	Items             []DownloadItem
+}
+
+type DownloadItem struct {
+	ID              int64
+	TaskID          int64
+	EpisodeID       int64
+	EpisodeNo       int
+	Title           string
+	PageURL         string
+	StreamURL       string
+	FilePath        string
+	SizeBytes       int64
+	DurationSeconds float64
+	Status          string
+	ErrorMessage    string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
+}
 
 var (
 	ErrNotFound   = errors.New("不存在")
@@ -64,6 +105,16 @@ type Platform struct {
 	LastSyncedAt *time.Time
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
+
+	LoginURL            string
+	LoginUsername       string
+	LoginPassword       string // 明文，仅用于写入前加密，不落库
+	LoginPasswordEnc    string // AES-GCM 密文
+	LoginUserSelector   string
+	LoginPassSelector   string
+	LoginSubmitSelector string
+	BrowserProfile      string
+	Cookie              string
 }
 
 type Episode struct {
@@ -197,4 +248,15 @@ type Store interface {
 	UpdateSkipRule(ctx context.Context, r SkipRule) error
 	DeleteSkipRule(ctx context.Context, id int64) error
 	EnsureBuiltinRule(ctx context.Context, r SkipRule) error
+
+	CreateDownloadTask(ctx context.Context, t DownloadTask) (DownloadTask, error)
+	GetDownloadTask(ctx context.Context, id int64) (DownloadTask, error)
+	ListDownloadTasks(ctx context.Context, workID int64, page, pageSize int) ([]DownloadTask, int, error)
+	UpdateDownloadTask(ctx context.Context, t DownloadTask) error
+	HasRunningDownload(ctx context.Context, workID int64) (bool, error)
+	FailStaleDownloads(ctx context.Context, reason string) error
+
+	AddDownloadItem(ctx context.Context, it DownloadItem) (DownloadItem, error)
+	UpdateDownloadItem(ctx context.Context, it DownloadItem) error
+	ListDownloadItems(ctx context.Context, taskID int64) ([]DownloadItem, error)
 }

@@ -11,6 +11,19 @@ export interface Platform {
   next_run_at: string | null;
   created_at: string;
   updated_at: string;
+  login_url: string;
+  login_username: string;
+  login_user_selector: string;
+  login_pass_selector: string;
+  login_submit_selector: string;
+  browser_profile: string;
+  has_login_password: boolean;
+  has_cookie: boolean;
+  // 仅写入时使用，接口不会回传
+  login_password?: string;
+  cookie?: string;
+  clear_login_password?: boolean;
+  clear_cookie?: boolean;
 }
 
 export interface Episode {
@@ -94,4 +107,45 @@ export interface Page<T> {
   total: number;
   page: number;
   page_size: number;
+}
+
+export interface DownloadItem {
+  id: number;
+  task_id: number;
+  episode_no: number;
+  title: string;
+  page_url: string;
+  stream_url: string;
+  size_bytes: number;
+  duration_seconds: number;
+  status: "queued" | "running" | "succeeded" | "failed" | "canceled";
+  error_message: string;
+  file_url?: string;
+}
+
+export interface DownloadProgress {
+  task_id: number;
+  episode_no: number;
+  done: number;
+  total: number;
+  percent: number;
+}
+
+export interface DownloadTask {
+  id: number;
+  work_id: number;
+  platform_id: number;
+  status: "queued" | "running" | "succeeded" | "failed" | "canceled";
+  total_episodes: number;
+  completed_episodes: number;
+  failed_episodes: number;
+  quality: string;
+  output_dir: string;
+  error_message: string;
+  started_at: string | null;
+  finished_at: string | null;
+  created_at: string;
+  updated_at: string;
+  items: DownloadItem[];
+  progress?: DownloadProgress;
 }

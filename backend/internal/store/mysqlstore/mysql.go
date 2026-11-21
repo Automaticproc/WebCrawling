@@ -99,8 +99,14 @@ func (s *Store) GetPlatformByCode(ctx context.Context, code string) (store.Platf
 
 func (s *Store) CreatePlatform(ctx context.Context, p store.Platform) (store.Platform, error) {
 	ts := now()
-	res, err := s.db.ExecContext(ctx, `INSERT INTO platforms (code, name, base_url, enabled, cron_expr, sitemap_path, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, p.Code, p.Name, p.BaseURL, boolInt(p.Enabled), p.CronExpr, p.SitemapPath, ts, ts)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO platforms (code, name, base_url, enabled, cron_expr, sitemap_path,
+		login_url, login_username, login_password, login_user_selector, login_pass_selector, login_submit_selector, browser_profile, cookie,
+		created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Code, p.Name, p.BaseURL, boolInt(p.Enabled), p.CronExpr, p.SitemapPath,
+		nullStr(p.LoginURL), nullStr(p.LoginUsername), nullStr(p.LoginPasswordEnc), nullStr(p.LoginUserSelector),
+		nullStr(p.LoginPassSelector), nullStr(p.LoginSubmitSelector), nullStr(p.BrowserProfile), nullStr(p.Cookie),
+		ts, ts)
 	if isDup(err) {
 		return store.Platform{}, store.ErrConflict
 	}
@@ -115,8 +121,13 @@ func (s *Store) CreatePlatform(ctx context.Context, p store.Platform) (store.Pla
 }
 
 func (s *Store) UpdatePlatform(ctx context.Context, p store.Platform) error {
-	res, err := s.db.ExecContext(ctx, `UPDATE platforms SET code=?, name=?, base_url=?, enabled=?, cron_expr=?, sitemap_path=?, updated_at=? WHERE id=?`,
-		p.Code, p.Name, p.BaseURL, boolInt(p.Enabled), p.CronExpr, p.SitemapPath, now(), p.ID)
+	res, err := s.db.ExecContext(ctx, `UPDATE platforms SET code=?, name=?, base_url=?, enabled=?, cron_expr=?, sitemap_path=?,
+		login_url=?, login_username=?, login_password=?, login_user_selector=?, login_pass_selector=?, login_submit_selector=?,
+		browser_profile=?, cookie=?, updated_at=? WHERE id=?`,
+		p.Code, p.Name, p.BaseURL, boolInt(p.Enabled), p.CronExpr, p.SitemapPath,
+		nullStr(p.LoginURL), nullStr(p.LoginUsername), nullStr(p.LoginPasswordEnc), nullStr(p.LoginUserSelector),
+		nullStr(p.LoginPassSelector), nullStr(p.LoginSubmitSelector), nullStr(p.BrowserProfile), nullStr(p.Cookie),
+		now(), p.ID)
 	if isDup(err) {
 		return store.ErrConflict
 	}
@@ -520,7 +531,8 @@ func (s *Store) episodes(ctx context.Context, workID int64) ([]store.Episode, er
 	return out, rows.Err()
 }
 
-const platformCols = `id, code, name, base_url, enabled, cron_expr, sitemap_path, last_synced_at, created_at, updated_at`
+const platformCols = `id, code, name, base_url, enabled, cron_expr, sitemap_path, last_synced_at, created_at, updated_at,
+	login_url, login_username, login_password, login_user_selector, login_pass_selector, login_submit_selector, browser_profile, cookie`
 const workCols = `id, platform_id, external_id, title, description, cover_url, category, tags, author, play_url, published_at, view_count, like_count, favorite_count, comment_count, episode_count, absent_count, last_seen_at, created_at, updated_at`
 const jobCols = `id, platform_id, mode, trigger_type, status, skip_reason, started_at, finished_at, discovered_count, created_count, updated_count, skipped_count, failed_count, absent_count, error_message, created_at`
 const ruleCols = `id, platform_id, name, rule_type, target, pattern, reason, enabled, locked, priority, created_at, updated_at`
@@ -531,10 +543,18 @@ func scanPlatform(row rower) (store.Platform, error) {
 	var p store.Platform
 	var enabled int
 	var last sql.NullTime
-	err := row.Scan(&p.ID, &p.Code, &p.Name, &p.BaseURL, &enabled, &p.CronExpr, &p.SitemapPath, &last, &p.CreatedAt, &p.UpdatedAt)
+	var loginURL, loginUser, loginPass, userSel, passSel, submitSel, profile, cookie sql.NullString
+	err := row.Scan(&p.ID, &p.Code, &p.Name, &p.BaseURL, &enabled, &p.CronExpr, &p.SitemapPath, &last, &p.CreatedAt, &p.UpdatedAt,
+		&loginURL, &loginUser, &loginPass, &userSel, &passSel, &submitSel, &profile, &cookie)
+	if err != nil {
+		return store.Platform{}, err
+	}
 	p.Enabled = enabled == 1
 	p.LastSyncedAt = timePtr(last)
-	return p, err
+	p.LoginURL, p.LoginUsername, p.LoginPasswordEnc = loginURL.String, loginUser.String, loginPass.String
+	p.LoginUserSelector, p.LoginPassSelector, p.LoginSubmitSelector = userSel.String, passSel.String, submitSel.String
+	p.BrowserProfile, p.Cookie = profile.String, cookie.String
+	return p, nil
 }
 
 func scanWork(row rower) (store.Work, error) {
@@ -664,3 +684,198 @@ func clip(s string, n int) string {
 }
 
 var _ store.Store = (*Store)(nil)
+
+const downloadTaskCols = `id, work_id, platform_id, status, total_episodes, completed_episodes,
+	failed_episodes, quality, output_dir, error_message, started_at, finished_at, created_at, updated_at`
+
+const downloadItemCols = `id, task_id, episode_id, episode_no, title, page_url, stream_url,
+	file_path, size_bytes, duration_seconds, status, error_message, created_at, updated_at`
+
+func (s *Store) CreateDownloadTask(ctx context.Context, t store.DownloadTask) (store.DownloadTask, error) {
+	ts := now()
+	if t.Status == "" {
+		t.Status = store.DownloadQueued
+	}
+	if t.StartedAt == nil && t.Status == store.DownloadRunning {
+		t.StartedAt = &ts
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO download_tasks (
+		work_id, platform_id, status, total_episodes, completed_episodes, failed_episodes,
+		quality, output_dir, error_message, started_at, finished_at, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.WorkID, t.PlatformID, t.Status, t.TotalEpisodes, t.CompletedEpisodes, t.FailedEpisodes,
+		clip(t.Quality, 16), clip(t.OutputDir, 1000), nullStr(clip(t.ErrorMessage, 500)), nullTime(t.StartedAt), nullTime(t.FinishedAt), ts, ts)
+	if err != nil {
+		return store.DownloadTask{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return store.DownloadTask{}, err
+	}
+	return s.GetDownloadTask(ctx, id)
+}
+
+func (s *Store) GetDownloadTask(ctx context.Context, id int64) (store.DownloadTask, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT `+downloadTaskCols+` FROM download_tasks WHERE id=?`, id)
+	t, err := scanDownloadTask(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return store.DownloadTask{}, store.ErrNotFound
+	}
+	if err != nil {
+		return store.DownloadTask{}, err
+	}
+	items, err := s.ListDownloadItems(ctx, id)
+	if err != nil {
+		return store.DownloadTask{}, err
+	}
+	t.Items = items
+	return t, nil
+}
+
+func (s *Store) ListDownloadTasks(ctx context.Context, workID int64, page, pageSize int) ([]store.DownloadTask, int, error) {
+	page, size := normPage(page, pageSize)
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM download_tasks WHERE (?=0 OR work_id=?)`, workID, workID).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+downloadTaskCols+` FROM download_tasks WHERE (?=0 OR work_id=?) ORDER BY id DESC LIMIT ? OFFSET ?`,
+		workID, workID, size, (page-1)*size)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	var out []store.DownloadTask
+	for rows.Next() {
+		t, err := scanDownloadTask(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		out = append(out, t)
+	}
+	return out, total, rows.Err()
+}
+
+func (s *Store) UpdateDownloadTask(ctx context.Context, t store.DownloadTask) error {
+	res, err := s.db.ExecContext(ctx, `UPDATE download_tasks SET status=?, total_episodes=?, completed_episodes=?,
+		failed_episodes=?, quality=?, output_dir=?, error_message=?, started_at=?, finished_at=?, updated_at=? WHERE id=?`,
+		t.Status, t.TotalEpisodes, t.CompletedEpisodes, t.FailedEpisodes, clip(t.Quality, 16),
+		clip(t.OutputDir, 1000), nullStr(clip(t.ErrorMessage, 500)), nullTime(t.StartedAt), nullTime(t.FinishedAt), now(), t.ID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) HasRunningDownload(ctx context.Context, workID int64) (bool, error) {
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM download_tasks WHERE work_id=? AND status IN (?, ?)`,
+		workID, store.DownloadQueued, store.DownloadRunning).Scan(&n)
+	return n > 0, err
+}
+
+func (s *Store) FailStaleDownloads(ctx context.Context, reason string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE download_tasks SET status=?, error_message=?, finished_at=?, updated_at=?
+		WHERE status IN (?, ?)`,
+		store.DownloadFailed, reason, now(), now(), store.DownloadQueued, store.DownloadRunning)
+	return err
+}
+
+func (s *Store) AddDownloadItem(ctx context.Context, it store.DownloadItem) (store.DownloadItem, error) {
+	ts := now()
+	if it.Status == "" {
+		it.Status = store.DownloadQueued
+	}
+	var episodeID any
+	if it.EpisodeID > 0 {
+		episodeID = it.EpisodeID
+	}
+	res, err := s.db.ExecContext(ctx, `INSERT INTO download_items (
+		task_id, episode_id, episode_no, title, page_url, stream_url, file_path,
+		size_bytes, duration_seconds, status, error_message, created_at, updated_at
+	) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		it.TaskID, episodeID, it.EpisodeNo, clip(it.Title, 240), clip(it.PageURL, 1000),
+		clip(it.StreamURL, 2000), clip(it.FilePath, 1000), it.SizeBytes, it.DurationSeconds,
+		it.Status, nullStr(clip(it.ErrorMessage, 500)), ts, ts)
+	if err != nil {
+		return store.DownloadItem{}, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return store.DownloadItem{}, err
+	}
+	it.ID = id
+	it.CreatedAt, it.UpdatedAt = ts, ts
+	return it, nil
+}
+
+func (s *Store) UpdateDownloadItem(ctx context.Context, it store.DownloadItem) error {
+	var episodeID any
+	if it.EpisodeID > 0 {
+		episodeID = it.EpisodeID
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE download_items SET episode_id=?, title=?, page_url=?, stream_url=?,
+		file_path=?, size_bytes=?, duration_seconds=?, status=?, error_message=?, updated_at=? WHERE id=?`,
+		episodeID, clip(it.Title, 240), clip(it.PageURL, 1000), clip(it.StreamURL, 2000),
+		clip(it.FilePath, 1000), it.SizeBytes, it.DurationSeconds, it.Status,
+		nullStr(clip(it.ErrorMessage, 500)), now(), it.ID)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return store.ErrNotFound
+	}
+	return nil
+}
+
+func (s *Store) ListDownloadItems(ctx context.Context, taskID int64) ([]store.DownloadItem, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT `+downloadItemCols+` FROM download_items WHERE task_id=? ORDER BY episode_no, id`, taskID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []store.DownloadItem
+	for rows.Next() {
+		it, err := scanDownloadItem(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func scanDownloadTask(row rower) (store.DownloadTask, error) {
+	var t store.DownloadTask
+	var errMsg sql.NullString
+	var started, finished sql.NullTime
+	err := row.Scan(&t.ID, &t.WorkID, &t.PlatformID, &t.Status, &t.TotalEpisodes, &t.CompletedEpisodes,
+		&t.FailedEpisodes, &t.Quality, &t.OutputDir, &errMsg, &started, &finished, &t.CreatedAt, &t.UpdatedAt)
+	if err != nil {
+		return store.DownloadTask{}, err
+	}
+	t.ErrorMessage = errMsg.String
+	t.StartedAt = timePtr(started)
+	t.FinishedAt = timePtr(finished)
+	return t, nil
+}
+
+func scanDownloadItem(row rower) (store.DownloadItem, error) {
+	var it store.DownloadItem
+	var episodeID sql.NullInt64
+	var pageURL, streamURL, filePath, errMsg sql.NullString
+	err := row.Scan(&it.ID, &it.TaskID, &episodeID, &it.EpisodeNo, &it.Title, &pageURL, &streamURL,
+		&filePath, &it.SizeBytes, &it.DurationSeconds, &it.Status, &errMsg, &it.CreatedAt, &it.UpdatedAt)
+	if err != nil {
+		return store.DownloadItem{}, err
+	}
+	if episodeID.Valid {
+		it.EpisodeID = episodeID.Int64
+	}
+	it.PageURL, it.StreamURL, it.FilePath, it.ErrorMessage = pageURL.String, streamURL.String, filePath.String, errMsg.String
+	return it, nil
+}

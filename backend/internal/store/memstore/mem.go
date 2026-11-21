@@ -22,6 +22,8 @@ type Store struct {
 	jobs      map[int64]store.SyncJob
 	items     map[int64][]store.SyncJobItem
 	rules     map[int64]store.SkipRule
+	downloads map[int64]store.DownloadTask
+	dlItems   map[int64][]store.DownloadItem
 	nextID    int64
 }
 
@@ -36,6 +38,8 @@ func New() *Store {
 		jobs:      map[int64]store.SyncJob{},
 		items:     map[int64][]store.SyncJobItem{},
 		rules:     map[int64]store.SkipRule{},
+		downloads: map[int64]store.DownloadTask{},
+		dlItems:   map[int64][]store.DownloadItem{},
 		nextID:    1,
 	}
 }
@@ -621,3 +625,136 @@ func cloneRule(r store.SkipRule) store.SkipRule {
 }
 
 var _ store.Store = (*Store)(nil)
+
+func (s *Store) CreateDownloadTask(_ context.Context, t store.DownloadTask) (store.DownloadTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t.ID = s.id()
+	t.CreatedAt = now()
+	t.UpdatedAt = t.CreatedAt
+	if t.Status == "" {
+		t.Status = store.DownloadQueued
+	}
+	if t.Status == store.DownloadRunning && t.StartedAt == nil {
+		ts := t.CreatedAt
+		t.StartedAt = &ts
+	}
+	s.downloads[t.ID] = t
+	return t, nil
+}
+
+func (s *Store) GetDownloadTask(_ context.Context, id int64) (store.DownloadTask, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	t, ok := s.downloads[id]
+	if !ok {
+		return store.DownloadTask{}, store.ErrNotFound
+	}
+	t.Items = append([]store.DownloadItem(nil), s.dlItems[id]...)
+	return t, nil
+}
+
+func (s *Store) ListDownloadTasks(_ context.Context, workID int64, page, pageSize int) ([]store.DownloadTask, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var all []store.DownloadTask
+	for _, t := range s.downloads {
+		if workID != 0 && t.WorkID != workID {
+			continue
+		}
+		all = append(all, t)
+	}
+	sort.Slice(all, func(i, j int) bool { return all[i].ID > all[j].ID })
+	total := len(all)
+	start, end := pageBounds(page, pageSize, total)
+	return all[start:end], total, nil
+}
+
+func (s *Store) UpdateDownloadTask(_ context.Context, t store.DownloadTask) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cur, ok := s.downloads[t.ID]
+	if !ok {
+		return store.ErrNotFound
+	}
+	t.CreatedAt = cur.CreatedAt
+	t.UpdatedAt = now()
+	s.downloads[t.ID] = t
+	return nil
+}
+
+func (s *Store) HasRunningDownload(_ context.Context, workID int64) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, t := range s.downloads {
+		if t.WorkID == workID && (t.Status == store.DownloadQueued || t.Status == store.DownloadRunning) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (s *Store) FailStaleDownloads(_ context.Context, reason string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ts := now()
+	for id, t := range s.downloads {
+		if t.Status != store.DownloadQueued && t.Status != store.DownloadRunning {
+			continue
+		}
+		t.Status = store.DownloadFailed
+		t.ErrorMessage = reason
+		t.FinishedAt = &ts
+		t.UpdatedAt = ts
+		s.downloads[id] = t
+	}
+	return nil
+}
+
+func (s *Store) AddDownloadItem(_ context.Context, it store.DownloadItem) (store.DownloadItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.downloads[it.TaskID]; !ok {
+		return store.DownloadItem{}, store.ErrNotFound
+	}
+	if it.Status == "" {
+		it.Status = store.DownloadQueued
+	}
+	it.ID = s.id()
+	it.CreatedAt, it.UpdatedAt = now(), now()
+	s.dlItems[it.TaskID] = append(s.dlItems[it.TaskID], it)
+	return it, nil
+}
+
+func (s *Store) UpdateDownloadItem(_ context.Context, it store.DownloadItem) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	list := s.dlItems[it.TaskID]
+	for i := range list {
+		if list[i].ID != it.ID {
+			continue
+		}
+		it.CreatedAt = list[i].CreatedAt
+		it.UpdatedAt = now()
+		list[i] = it
+		s.dlItems[it.TaskID] = list
+		return nil
+	}
+	return store.ErrNotFound
+}
+
+func (s *Store) ListDownloadItems(_ context.Context, taskID int64) ([]store.DownloadItem, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.downloads[taskID]; !ok {
+		return nil, store.ErrNotFound
+	}
+	out := append([]store.DownloadItem(nil), s.dlItems[taskID]...)
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].EpisodeNo != out[j].EpisodeNo {
+			return out[i].EpisodeNo < out[j].EpisodeNo
+		}
+		return out[i].ID < out[j].ID
+	})
+	return out, nil
+}

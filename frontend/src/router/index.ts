@@ -15,6 +15,7 @@ export const router = createRouter({
         { path: "works/:id", component: () => import("../views/WorkDetail.vue") },
         { path: "jobs", component: () => import("../views/Jobs.vue") },
         { path: "jobs/:id", component: () => import("../views/JobDetail.vue") },
+        { path: "downloads", component: () => import("../views/Downloads.vue") },
         { path: "rules", component: () => import("../views/SkipRules.vue") },
       ],
     },

@@ -1,5 +1,5 @@
 import axios from "axios";
-import type { Page, Platform, SkipRule, SyncJob, SyncJobItem, Work } from "./types";
+import type { DownloadTask, Page, Platform, SkipRule, SyncJob, SyncJobItem, Work } from "./types";
 
 export const http = axios.create({
   withCredentials: true,
@@ -97,5 +97,24 @@ export const api = {
   },
   async deleteRule(id: number) {
     await http.delete(`/api/v1/skip-rules/${id}`);
+  },
+  async startDownload(workId: number, quality: string) {
+    const { data } = await http.post<DownloadTask>(`/api/v1/works/${workId}/downloads`, { quality });
+    return data;
+  },
+  async downloads(params: { page: number; page_size: number; work_id?: number }) {
+    const { data } = await http.get<Page<DownloadTask>>("/api/v1/downloads", { params });
+    return data;
+  },
+  async download(id: number) {
+    const { data } = await http.get<DownloadTask>(`/api/v1/downloads/${id}`);
+    return data;
+  },
+  async cancelDownload(id: number) {
+    await http.post(`/api/v1/downloads/${id}/cancel`);
+  },
+  async retryDownload(id: number) {
+    const { data } = await http.post<DownloadTask>(`/api/v1/downloads/${id}/retry`);
+    return data;
   },
 };

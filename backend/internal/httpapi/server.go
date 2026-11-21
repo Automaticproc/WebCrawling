@@ -8,6 +8,8 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"os"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -15,7 +17,9 @@ import (
 
 	"catalog/internal/auth"
 	"catalog/internal/config"
+	"catalog/internal/download"
 	"catalog/internal/schedule"
+	"catalog/internal/secretbox"
 	"catalog/internal/store"
 	"catalog/internal/syncer"
 	"catalog/internal/timeutil"
@@ -27,10 +31,11 @@ type Server struct {
 	cfg   config.Config
 	store store.Store
 	sync  *syncer.Service
+	dl    *download.Service
 }
 
-func New(cfg config.Config, st store.Store, sync *syncer.Service) *Server {
-	return &Server{cfg: cfg, store: st, sync: sync}
+func New(cfg config.Config, st store.Store, sync *syncer.Service, dl *download.Service) *Server {
+	return &Server{cfg: cfg, store: st, sync: sync, dl: dl}
 }
 
 func (s *Server) Handler() http.Handler {
@@ -47,6 +52,12 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/v1/platforms/{id}/sync", s.protected(s.syncPlatform))
 	mux.HandleFunc("GET /api/v1/works", s.protected(s.listWorks))
 	mux.HandleFunc("GET /api/v1/works/{id}", s.protected(s.getWork))
+	mux.HandleFunc("POST /api/v1/works/{id}/downloads", s.protected(s.startDownload))
+	mux.HandleFunc("GET /api/v1/downloads", s.protected(s.listDownloads))
+	mux.HandleFunc("GET /api/v1/downloads/{id}", s.protected(s.getDownload))
+	mux.HandleFunc("POST /api/v1/downloads/{id}/cancel", s.protected(s.cancelDownload))
+	mux.HandleFunc("POST /api/v1/downloads/{id}/retry", s.protected(s.retryDownload))
+	mux.HandleFunc("GET /api/v1/downloads/{id}/items/{itemID}/file", s.protected(s.downloadFile))
 	mux.HandleFunc("GET /api/v1/sync-jobs", s.protected(s.listJobs))
 	mux.HandleFunc("GET /api/v1/sync-jobs/{id}", s.protected(s.getJob))
 	mux.HandleFunc("GET /api/v1/sync-jobs/{id}/items", s.protected(s.listJobItems))
@@ -181,7 +192,7 @@ func (s *Server) getPlatform(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) createPlatform(w http.ResponseWriter, r *http.Request) {
-	p, err := s.readPlatform(r, 0)
+	p, _, err := s.readPlatform(r, 0)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
@@ -196,16 +207,23 @@ func (s *Server) createPlatform(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) updatePlatform(w http.ResponseWriter, r *http.Request) {
 	id := pathID(r)
-	if _, err := s.store.GetPlatform(r.Context(), id); err != nil {
+	existing, err := s.store.GetPlatform(r.Context(), id)
+	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
-	p, err := s.readPlatform(r, id)
+	p, flags, err := s.readPlatform(r, id)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	p.ID = id
+	if p.LoginPasswordEnc == "" && !flags.ClearLoginPassword {
+		p.LoginPasswordEnc = existing.LoginPasswordEnc
+	}
+	if p.Cookie == "" && !flags.ClearCookie {
+		p.Cookie = existing.Cookie
+	}
 	if err := s.store.UpdatePlatform(r.Context(), p); err != nil {
 		writeStoreErr(w, err)
 		return
@@ -274,6 +292,173 @@ func (s *Server) getWork(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, workJSON(item, true))
+}
+
+var qualityRe = regexp.MustCompile(`^(best|worst|[0-9]{3,4}p?)$`)
+
+func (s *Server) startDownload(w http.ResponseWriter, r *http.Request) {
+	if s.dl == nil {
+		writeError(w, http.StatusServiceUnavailable, "下载服务未启用")
+		return
+	}
+	var body struct {
+		Quality string `json:"quality"`
+	}
+	if r.ContentLength != 0 {
+		if err := decode(r, &body); err != nil {
+			writeError(w, http.StatusBadRequest, "请求格式无效")
+			return
+		}
+	}
+	if body.Quality == "" {
+		body.Quality = "best"
+	}
+	if !qualityRe.MatchString(body.Quality) {
+		writeError(w, http.StatusBadRequest, "画质只能是 best / worst / 720p / 1080p")
+		return
+	}
+	task, err := s.dl.StartWork(r.Context(), pathID(r), body.Quality)
+	if err != nil {
+		switch {
+		case errors.Is(err, download.ErrRunning):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeStoreErr(w, err)
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, downloadJSON(task, download.Progress{}, false))
+}
+
+func (s *Server) listDownloads(w http.ResponseWriter, r *http.Request) {
+	page, size := pageQuery(r)
+	workID, _ := strconv.ParseInt(r.URL.Query().Get("work_id"), 10, 64)
+	items, total, err := s.store.ListDownloadTasks(r.Context(), workID, page, size)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	out := make([]any, 0, len(items))
+	for _, t := range items {
+		out = append(out, downloadJSON(t, download.Progress{}, false))
+	}
+	writeJSON(w, http.StatusOK, pageBody(out, total, page, size))
+}
+
+func (s *Server) getDownload(w http.ResponseWriter, r *http.Request) {
+	task, err := s.store.GetDownloadTask(r.Context(), pathID(r))
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	var (
+		prog download.Progress
+		ok   bool
+	)
+	if s.dl != nil {
+		prog, ok = s.dl.Snapshot(task.ID)
+	}
+	writeJSON(w, http.StatusOK, downloadJSON(task, prog, ok))
+}
+
+func (s *Server) cancelDownload(w http.ResponseWriter, r *http.Request) {
+	if s.dl == nil {
+		writeError(w, http.StatusServiceUnavailable, "下载服务未启用")
+		return
+	}
+	if err := s.dl.Cancel(r.Context(), pathID(r)); err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"ok": true})
+}
+
+func (s *Server) retryDownload(w http.ResponseWriter, r *http.Request) {
+	if s.dl == nil {
+		writeError(w, http.StatusServiceUnavailable, "下载服务未启用")
+		return
+	}
+	task, err := s.dl.RetryTask(r.Context(), pathID(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, download.ErrRunning):
+			writeError(w, http.StatusConflict, err.Error())
+		case errors.Is(err, download.ErrNothingToRetry):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, store.ErrNotFound):
+			writeStoreErr(w, err)
+		default:
+			writeError(w, http.StatusBadRequest, err.Error())
+		}
+		return
+	}
+	writeJSON(w, http.StatusAccepted, downloadJSON(task, download.Progress{}, false))
+}
+
+func (s *Server) downloadFile(w http.ResponseWriter, r *http.Request) {
+	taskID := pathID(r)
+	itemID, _ := strconv.ParseInt(r.PathValue("itemID"), 10, 64)
+	items, err := s.store.ListDownloadItems(r.Context(), taskID)
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	var target string
+	for _, it := range items {
+		if it.ID == itemID {
+			target = it.FilePath
+			break
+		}
+	}
+	if target == "" {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	root, err := filepath.Abs(s.cfg.DownloadDir)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "下载目录配置无效")
+		return
+	}
+	abs, err := filepath.Abs(target)
+	if err != nil || !strings.HasPrefix(abs, root+string(os.PathSeparator)) {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	if _, err := os.Stat(abs); err != nil {
+		writeError(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+filepath.Base(abs)+`"`)
+	http.ServeFile(w, r, abs)
+}
+
+func downloadJSON(t store.DownloadTask, prog download.Progress, hasProg bool) map[string]any {
+	items := make([]any, 0, len(t.Items))
+	for _, it := range t.Items {
+		item := map[string]any{
+			"id": it.ID, "task_id": it.TaskID, "episode_no": it.EpisodeNo, "title": it.Title,
+			"page_url": it.PageURL, "stream_url": it.StreamURL, "size_bytes": it.SizeBytes,
+			"duration_seconds": it.DurationSeconds, "status": it.Status, "error_message": it.ErrorMessage,
+		}
+		if it.Status == store.DownloadSucceeded && it.FilePath != "" {
+			item["file_url"] = "/api/v1/downloads/" + strconv.FormatInt(t.ID, 10) +
+				"/items/" + strconv.FormatInt(it.ID, 10) + "/file"
+		}
+		items = append(items, item)
+	}
+	out := map[string]any{
+		"id": t.ID, "work_id": t.WorkID, "platform_id": t.PlatformID, "status": t.Status,
+		"total_episodes": t.TotalEpisodes, "completed_episodes": t.CompletedEpisodes,
+		"failed_episodes": t.FailedEpisodes, "quality": t.Quality, "output_dir": t.OutputDir,
+		"error_message": t.ErrorMessage, "started_at": utcPtr(t.StartedAt), "finished_at": utcPtr(t.FinishedAt),
+		"created_at": t.CreatedAt.UTC(), "updated_at": t.UpdatedAt.UTC(), "items": items,
+	}
+	if hasProg {
+		out["progress"] = prog
+	}
+	return out
 }
 
 func (s *Server) listJobs(w http.ResponseWriter, r *http.Request) {
@@ -370,43 +555,86 @@ func (s *Server) deleteRule(w http.ResponseWriter, r *http.Request) {
 
 var codeRe = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,31}$`)
 
-func (s *Server) readPlatform(r *http.Request, id int64) (store.Platform, error) {
+type platformFlags struct {
+	ClearLoginPassword bool
+	ClearCookie        bool
+}
+
+func (s *Server) readPlatform(r *http.Request, id int64) (store.Platform, platformFlags, error) {
 	var body struct {
-		Code        string `json:"code"`
-		Name        string `json:"name"`
-		BaseURL     string `json:"base_url"`
-		Enabled     *bool  `json:"enabled"`
-		CronExpr    string `json:"cron_expr"`
-		SitemapPath string `json:"sitemap_path"`
+		Code                string `json:"code"`
+		Name                string `json:"name"`
+		BaseURL             string `json:"base_url"`
+		Enabled             *bool  `json:"enabled"`
+		CronExpr            string `json:"cron_expr"`
+		SitemapPath         string `json:"sitemap_path"`
+		LoginURL            string `json:"login_url"`
+		LoginUsername       string `json:"login_username"`
+		LoginPassword       string `json:"login_password"`
+		LoginUserSelector   string `json:"login_user_selector"`
+		LoginPassSelector   string `json:"login_pass_selector"`
+		LoginSubmitSelector string `json:"login_submit_selector"`
+		BrowserProfile      string `json:"browser_profile"`
+		Cookie              string `json:"cookie"`
+		ClearLoginPassword  bool   `json:"clear_login_password"`
+		ClearCookie         bool   `json:"clear_cookie"`
 	}
 	if err := decode(r, &body); err != nil {
-		return store.Platform{}, errors.New("请求格式无效")
+		return store.Platform{}, platformFlags{}, errors.New("请求格式无效")
 	}
 	body.Code = strings.TrimSpace(body.Code)
 	body.Name = strings.TrimSpace(body.Name)
 	if !codeRe.MatchString(body.Code) {
-		return store.Platform{}, errors.New("平台代码需为 2-32 位小写字母、数字、下划线或连字符")
+		return store.Platform{}, platformFlags{}, errors.New("平台代码需为 2-32 位小写字母、数字、下划线或连字符")
 	}
 	if body.Name == "" || len([]rune(body.Name)) > 128 {
-		return store.Platform{}, errors.New("请填写平台名称")
+		return store.Platform{}, platformFlags{}, errors.New("请填写平台名称")
 	}
 	origin, err := originOnly(body.BaseURL)
 	if err != nil {
-		return store.Platform{}, err
+		return store.Platform{}, platformFlags{}, err
 	}
 	cronExpr := strings.TrimSpace(body.CronExpr)
 	if cronExpr == "" {
 		cronExpr = timeutil.DefaultCron
 	}
 	if !schedule.Valid(cronExpr) {
-		return store.Platform{}, errors.New("Cron 需要 5 段，并按香港时间解释")
+		return store.Platform{}, platformFlags{}, errors.New("Cron 需要 5 段，并按香港时间解释")
 	}
 	path := strings.TrimSpace(body.SitemapPath)
 	if path == "" {
 		path = "/sitemap.xml"
 	}
 	if !strings.HasPrefix(path, "/") || strings.Contains(path, "..") || strings.Contains(path, "?") || strings.HasPrefix(strings.ToLower(path), "/api") {
-		return store.Platform{}, errors.New("站点地图路径无效")
+		return store.Platform{}, platformFlags{}, errors.New("站点地图路径无效")
+	}
+
+	loginURL := strings.TrimSpace(body.LoginURL)
+	if loginURL != "" {
+		u, err := url.Parse(loginURL)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" || len(loginURL) > 1024 {
+			return store.Platform{}, platformFlags{}, errors.New("登录地址需要是 http 或 https 完整地址")
+		}
+	}
+	fields := map[string]string{
+		"login_username": body.LoginUsername, "login_password": body.LoginPassword,
+		"login_user_selector": body.LoginUserSelector, "login_pass_selector": body.LoginPassSelector,
+		"login_submit_selector": body.LoginSubmitSelector, "browser_profile": body.BrowserProfile,
+		"cookie": body.Cookie,
+	}
+	limits := map[string]int{
+		"login_username": 200, "login_password": 500, "login_user_selector": 200,
+		"login_pass_selector": 200, "login_submit_selector": 200, "browser_profile": 1000, "cookie": 4000,
+	}
+	for k, v := range fields {
+		if len([]rune(v)) > limits[k] {
+			return store.Platform{}, platformFlags{}, errors.New("登录配置字段过长：" + k)
+		}
+	}
+
+	enc, err := secretbox.Encrypt(s.cfg.SessionSecret, body.LoginPassword)
+	if err != nil {
+		return store.Platform{}, platformFlags{}, errors.New("登录密码加密失败")
 	}
 	enabled := true
 	if body.Enabled != nil {
@@ -414,7 +642,12 @@ func (s *Server) readPlatform(r *http.Request, id int64) (store.Platform, error)
 	}
 	return store.Platform{
 		ID: id, Code: body.Code, Name: body.Name, BaseURL: origin, Enabled: enabled, CronExpr: cronExpr, SitemapPath: path,
-	}, nil
+		LoginURL: loginURL, LoginUsername: strings.TrimSpace(body.LoginUsername), LoginPasswordEnc: enc,
+		LoginUserSelector:   strings.TrimSpace(body.LoginUserSelector),
+		LoginPassSelector:   strings.TrimSpace(body.LoginPassSelector),
+		LoginSubmitSelector: strings.TrimSpace(body.LoginSubmitSelector),
+		BrowserProfile:      strings.TrimSpace(body.BrowserProfile), Cookie: strings.TrimSpace(body.Cookie),
+	}, platformFlags{ClearLoginPassword: body.ClearLoginPassword, ClearCookie: body.ClearCookie}, nil
 }
 
 func originOnly(raw string) (string, error) {
@@ -487,6 +720,10 @@ func platformJSON(p store.Platform) map[string]any {
 		"cron_expr": p.CronExpr, "sitemap_path": p.SitemapPath, "supported": p.Code == "huangguoai",
 		"last_synced_at": utcPtr(p.LastSyncedAt), "next_run_at": next,
 		"created_at": p.CreatedAt.UTC(), "updated_at": p.UpdatedAt.UTC(),
+		"login_url": p.LoginURL, "login_username": p.LoginUsername,
+		"login_user_selector": p.LoginUserSelector, "login_pass_selector": p.LoginPassSelector,
+		"login_submit_selector": p.LoginSubmitSelector, "browser_profile": p.BrowserProfile,
+		"has_login_password": p.LoginPasswordEnc != "", "has_cookie": p.Cookie != "",
 	}
 }
 

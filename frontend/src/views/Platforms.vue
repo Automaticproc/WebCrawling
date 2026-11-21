@@ -39,14 +39,67 @@
       </el-table>
     </div>
 
-    <el-dialog v-model="dialog" :title="editing ? '编辑平台' : '新建平台'" width="520px">
+    <el-dialog v-model="dialog" :title="editing ? '编辑平台' : '新建平台'" width="640px">
       <el-form label-position="top">
         <el-form-item label="名称"><el-input v-model="form.name" /></el-form-item>
         <el-form-item label="代码"><el-input v-model="form.code" placeholder="例如 huangguoai" /></el-form-item>
         <el-form-item label="源站地址"><el-input v-model="form.base_url" placeholder="https://example.com" /></el-form-item>
         <el-form-item label="站点地图路径"><el-input v-model="form.sitemap_path" placeholder="/sitemap.xml" /></el-form-item>
+        <p class="note" style="margin: -8px 0 12px">
+          一般是 <code>/sitemap.xml</code>。不确定就先打开 <code>https://站点/robots.txt</code>，看里面的
+          <code>Sitemap:</code> 行；也可以直接在浏览器访问 <code>https://站点/sitemap.xml</code>。
+        </p>
         <el-form-item label="Cron（香港时间）"><el-input v-model="form.cron_expr" placeholder="0 8 * * *" /></el-form-item>
         <el-form-item label="参与定时同步"><el-switch v-model="form.enabled" /></el-form-item>
+
+        <el-divider content-position="left">登录配置（下载时使用，可选）</el-divider>
+        <el-alert
+          type="info"
+          :closable="false"
+          show-icon
+          title="需要 VIP/登录的站点才填。支持自动填表登录，或直接贴 Cookie；密码加密保存，接口不回传。"
+          style="margin-bottom: 12px"
+        />
+        <el-form-item label="登录页地址">
+          <el-input v-model="form.login_url" placeholder="https://example.com/login" />
+        </el-form-item>
+        <el-form-item label="登录账号">
+          <el-input v-model="form.login_username" placeholder="手机号 / 邮箱 / 用户名" />
+        </el-form-item>
+        <el-form-item label="登录密码">
+          <el-input
+            v-model="form.login_password"
+            type="password"
+            show-password
+            :placeholder="form.has_login_password ? '已保存，留空表示不修改' : '留空表示不使用自动登录'"
+          />
+        </el-form-item>
+        <el-form-item v-if="form.has_login_password">
+          <el-checkbox v-model="form.clear_login_password">清除已保存的登录密码</el-checkbox>
+        </el-form-item>
+        <el-form-item label="用户名选择器（可选）">
+          <el-input v-model="form.login_user_selector" placeholder="input[name=username]" />
+        </el-form-item>
+        <el-form-item label="密码选择器（可选）">
+          <el-input v-model="form.login_pass_selector" placeholder="input[type=password]" />
+        </el-form-item>
+        <el-form-item label="提交按钮选择器（可选）">
+          <el-input v-model="form.login_submit_selector" placeholder="button[type=submit]" />
+        </el-form-item>
+        <el-form-item label="Cookie（可选，优先于自动登录）">
+          <el-input
+            v-model="form.cookie"
+            type="textarea"
+            :rows="2"
+            :placeholder="form.has_cookie ? '已保存，留空表示不修改' : 'vip=1; token=abc123'"
+          />
+        </el-form-item>
+        <el-form-item v-if="form.has_cookie">
+          <el-checkbox v-model="form.clear_cookie">清除已保存的 Cookie</el-checkbox>
+        </el-form-item>
+        <el-form-item label="浏览器 profile 目录（可选）">
+          <el-input v-model="form.browser_profile" placeholder="留空用默认：<下载目录>/.browser-profile/<平台代码>" />
+        </el-form-item>
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
@@ -78,6 +131,18 @@ const form = reactive({
   sitemap_path: "/sitemap.xml",
   cron_expr: "0 8 * * *",
   enabled: true,
+  login_url: "",
+  login_username: "",
+  login_password: "",
+  login_user_selector: "",
+  login_pass_selector: "",
+  login_submit_selector: "",
+  browser_profile: "",
+  cookie: "",
+  clear_login_password: false,
+  clear_cookie: false,
+  has_login_password: false,
+  has_cookie: false,
 });
 
 async function load() {
@@ -94,13 +159,26 @@ async function load() {
 
 function openCreate() {
   editing.value = null;
-  Object.assign(form, { name: "", code: "", base_url: "", sitemap_path: "/sitemap.xml", cron_expr: "0 8 * * *", enabled: true });
+  Object.assign(form, {
+    name: "", code: "", base_url: "", sitemap_path: "/sitemap.xml", cron_expr: "0 8 * * *", enabled: true,
+    login_url: "", login_username: "", login_password: "", login_user_selector: "", login_pass_selector: "",
+    login_submit_selector: "", browser_profile: "", cookie: "",
+    clear_login_password: false, clear_cookie: false, has_login_password: false, has_cookie: false,
+  });
   dialog.value = true;
 }
 
 function openEdit(row: Platform) {
   editing.value = row.id;
-  Object.assign(form, row);
+  Object.assign(form, {
+    name: row.name, code: row.code, base_url: row.base_url, sitemap_path: row.sitemap_path,
+    cron_expr: row.cron_expr, enabled: row.enabled,
+    login_url: row.login_url || "", login_username: row.login_username || "",
+    login_user_selector: row.login_user_selector || "", login_pass_selector: row.login_pass_selector || "",
+    login_submit_selector: row.login_submit_selector || "", browser_profile: row.browser_profile || "",
+    login_password: "", cookie: "", clear_login_password: false, clear_cookie: false,
+    has_login_password: row.has_login_password, has_cookie: row.has_cookie,
+  });
   dialog.value = true;
 }
 
@@ -114,6 +192,16 @@ async function save() {
       sitemap_path: form.sitemap_path,
       cron_expr: form.cron_expr,
       enabled: form.enabled,
+      login_url: form.login_url,
+      login_username: form.login_username,
+      login_password: form.login_password,
+      login_user_selector: form.login_user_selector,
+      login_pass_selector: form.login_pass_selector,
+      login_submit_selector: form.login_submit_selector,
+      browser_profile: form.browser_profile,
+      cookie: form.cookie,
+      clear_login_password: form.clear_login_password,
+      clear_cookie: form.clear_cookie,
     }, editing.value || undefined);
     dialog.value = false;
     ElMessage.success("已保存");
